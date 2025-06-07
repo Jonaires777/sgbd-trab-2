@@ -31,7 +31,7 @@ class Program
 
             Directory.CreateDirectory(outDir);
 
-            string filePath = Path.Combine(outDir, "selecao_vinho_ano_colheita_1990.csv");
+            string filePath = Path.Combine(outDir, "selecao_vinho_pos_operacoes.csv");
             op.SaveTuplesToFile(filePath);
         }
         catch (Exception e)
