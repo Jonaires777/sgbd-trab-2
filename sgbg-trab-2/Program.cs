@@ -25,11 +25,16 @@ class Program
             Console.WriteLine($"#IOs: {op.GetIOCount()}"); 
             Console.WriteLine($"#Tups: {op.GetTuplesCount()}");
 
-            string projectRoot = Directory.GetCurrentDirectory();
-            string filePath = Path.Combine(projectRoot, "selecao_vinho_ano_colheita_1990.csv");
-            op.SaveTuplesToFile(filePath);
+            string projectRoot = AppContext.BaseDirectory;
+            string solutionRoot = Path.GetFullPath(Path.Combine(projectRoot, @"..\..\..\.."));
+            string outDir = Path.Combine(solutionRoot, "out");
 
-        } catch (Exception e)
+            Directory.CreateDirectory(outDir);
+
+            string filePath = Path.Combine(outDir, "selecao_vinho_ano_colheita_1990.csv");
+            op.SaveTuplesToFile(filePath);
+        }
+        catch (Exception e)
         {
             Console.WriteLine($"Error: {e.Message}");
             Console.WriteLine($"Stack Trace: {e.StackTrace}");
