@@ -1,5 +1,5 @@
 ﻿using System;
-using System.Reflection.Emit;
+using System.IO;
 using sgbg_trab_2.Models;
 using sgbg_trab_2.Operations;
 
@@ -7,7 +7,7 @@ class Program
 {
     static void Main(string[] args)
     {
-        try 
+        try
         {
             Table vinho = new Table("vinho.csv");
             Table uva = new Table("uva.csv");
@@ -17,22 +17,25 @@ class Program
             uva.LoadData();
             pais.LoadData();
 
-            Operator op = new Operator(vinho, uva, "vinho_id", "uva_id");
+            var results = new List<JoinResult>();
 
-            op.Execute();
+            //results.Add(new JoinResult("Uva join Vinho", new Operator(uva, vinho, "uva_id", "uva_id")));
+            results.Add(new JoinResult("Vinho join Uva", new Operator(vinho, uva, "uva_id", "uva_id")));
+            //results.Add(new JoinResult("Uva join País", new Operator(uva, pais, "pais_origem_id", "pais_id")));
+            //results.Add(new JoinResult("Vinho join País", new Operator(vinho, pais, "pais_producao_id", "pais_id")));
 
-            Console.WriteLine($"#Pags: {op.GetPagesCount()}"); 
-            Console.WriteLine($"#IOs: {op.GetIOCount()}"); 
-            Console.WriteLine($"#Tups: {op.GetTuplesCount()}");
+            foreach (var result in results)
+                result.Op.Execute();
+
+            Printer.PrintJoinSummary(results);
 
             string projectRoot = AppContext.BaseDirectory;
             string solutionRoot = Path.GetFullPath(Path.Combine(projectRoot, @"..\..\..\.."));
             string outDir = Path.Combine(solutionRoot, "out");
 
-            Directory.CreateDirectory(outDir);
+            Printer.SaveResults(results, outDir);
 
-            string filePath = Path.Combine(outDir, "selecao_vinho_pos_operacoes.csv");
-            op.SaveTuplesToFile(filePath);
+            Console.WriteLine("All operations completed successfully!");
         }
         catch (Exception e)
         {
@@ -40,4 +43,5 @@ class Program
             Console.WriteLine($"Stack Trace: {e.StackTrace}");
         }
     }
+
 }

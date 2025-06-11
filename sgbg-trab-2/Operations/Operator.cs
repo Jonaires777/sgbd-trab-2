@@ -21,6 +21,11 @@ namespace sgbg_trab_2.Operations
         private List<Models.Tuple> _resultTuples;
         private List<string> _tempFiles;
 
+        private const int BUFFER_SIZE = 4;
+        private const int SORT_BUFFERS = 3;
+        private const int OUTPUT_BUFFER = 1;
+        private const int TUPLES_PER_PAGE = 10;
+
         public Operator(Table firstTable, Table secondTable, string firstColumn, string secondColumn)
         {
             _firstTable = firstTable;
@@ -39,66 +44,104 @@ namespace sgbg_trab_2.Operations
             Console.WriteLine($"Executing Sort-Merge Join between {_firstTable.Name} e {_secondTable.Name}");
             Console.WriteLine($"Condition: {_firstTable.Name}.{_firstColumn} = {_secondTable.Name}.{_secondColumn}");
 
-            var firstSortedTable = SortTable(_firstTable, _firstColumn);
-            var secondSortedTable = SortTable(_secondTable, _secondColumn);
+            var firstSortedRuns = SortTableWithBuffers(_firstTable, _firstColumn);
+            var secondSortedRuns = SortTableWithBuffers(_secondTable, _secondColumn);
 
-            ExecuteMergeJoin(firstSortedTable, secondSortedTable);
+            ExecuteMergeJoinWithBuffers(firstSortedRuns, secondSortedRuns);
 
             CleanData();
 
             Console.WriteLine($"Join finished. {_tuplesCount} tuples generated");
+            Console.WriteLine();
         }
 
-        private List<Models.Tuple> SortTable(Table table, string columnName)
+        private List<string> SortTableWithBuffers(Table table, string columnName)
         {
             Console.WriteLine($"Sorting table {table.Name} by column {columnName}");
 
-            var runs = new List<string>();
+            var initalRuns = CreateInitialRuns(table, columnName);
 
-            foreach (var page in table.Pages)
+            var finalRuns = MergeRunsWithBuffers(initalRuns, columnName);
+
+            return finalRuns;
+        }
+
+        private List<String> CreateInitialRuns(Table table, string columnName)
+        {
+            var runs = new List<string>();
+            var bufferPages = new List<Page>();
+            int bufferTupleCount = 0;
+            
+            foreach(var page in table.Pages)
             {
                 _IOCount++;
+                bufferPages.Add(page);
+                bufferTupleCount += page.OccupiedTuples;
 
-                var tuples = page.GetTuples();
-
-                tuples.Sort((t1, t2) =>
+                if (bufferPages.Count >= SORT_BUFFERS ||
+                    bufferTupleCount >= SORT_BUFFERS * TUPLES_PER_PAGE)
                 {
-                    var val1 = t1.GetValue(columnName);
-                    var val2 = t2.GetValue(columnName);
-
-                    if (val1 == null && val2 == null) return 0;
-                    if (val1 == null) return -1;
-                    if (val2 == null) return 1;
-
-                    return Comparer<object>.Default.Compare(val1, val2);
-                });
-
-                var nameRun = Path.GetTempFileName();
-                _tempFiles.Add(nameRun);
-
-                using (var writer = new StreamWriter(nameRun))
-                {
-                    foreach (var tupla in tuples)
-                    {
-                        writer.WriteLine(SerializeTuple(tupla));
-                    }
+                    var run = CreateSortedRun(bufferPages, columnName);
+                    runs.Add(run);
+                    bufferPages.Clear();
+                    bufferTupleCount = 0;
                 }
-
-                _IOCount++;
-                runs.Add(nameRun);
             }
 
-            while (runs.Count > 1)
+            if (bufferPages.Count > 0)
+            {
+                var run = CreateSortedRun(bufferPages, columnName);
+                runs.Add(run);
+            }
+
+            return runs;
+        }
+
+        private string CreateSortedRun(List<Page> pages, string columnName)
+        {
+            var allTuples = new List<Models.Tuple>();
+
+            foreach (var page in pages)
+            {
+                allTuples.AddRange(page.GetTuples());
+            }
+
+            allTuples.Sort((t1, t2) => CompareTuple(t1, t2, columnName));
+
+            var outFile = Path.GetTempFileName();
+            _tempFiles.Add(outFile);
+
+            using (var writer = new StreamWriter(outFile))
+            {
+                foreach (var tuple in allTuples)
+                {
+                    writer.WriteLine(SerializeTuple(tuple));
+                }
+            }
+
+            _IOCount++;
+            return outFile;
+        }
+
+        private List<string> MergeRunsWithBuffers(List<string> runs, string columnName)
+        {
+            while(runs.Count > 1)
             {
                 var newRuns = new List<string>();
-                for (int i = 0; i < runs.Count; i += 3)
+
+                int buffersNeeded = Math.Min(SORT_BUFFERS, runs.Count) + OUTPUT_BUFFER;
+                if (buffersNeeded > BUFFER_SIZE)
                 {
-                    var group = runs.Skip(i).Take(3).ToList();
-                    var runMerged = MergeRuns(group, columnName);
-                    newRuns.Add(runMerged);
+                    Console.WriteLine($"Warning: Buffers needed ({buffersNeeded}) exceeds available ({BUFFER_SIZE})");
                 }
 
-                // Clean up old runs that are no longer needed
+                for (int i = 0; i < runs.Count; i += SORT_BUFFERS)
+                {
+                    var group = runs.Skip(i).Take(SORT_BUFFERS).ToList();
+                    var mergedRun = MergeRunsGroup(group, columnName);
+                    newRuns.Add(mergedRun);
+                }
+
                 foreach (var oldRun in runs)
                 {
                     if (!newRuns.Contains(oldRun))
@@ -110,69 +153,76 @@ namespace sgbg_trab_2.Operations
                 runs = newRuns;
             }
 
-            return LoadSortedTuples(runs[0]);
+            return runs;
         }
 
-        private string MergeRuns(List<string> runs, string columnName)
+        private string MergeRunsGroup(List<string> runs, string columname)
         {
-            var outFile = Path.GetTempFileName();
-            _tempFiles.Add(outFile);
+            var outfile = Path.GetTempFileName();
+            _tempFiles.Add(outfile);
 
             var readers = new List<StreamReader>();
-            var currentTuples = new List<Models.Tuple>();
+            var inputBuffers = new List<Queue<Models.Tuple>>();
+            var outputBuffer = new List<Models.Tuple>();
 
             try
             {
-                foreach (var run in runs)
+                foreach(var run in runs)
                 {
                     _IOCount++;
                     var reader = new StreamReader(run);
                     readers.Add(reader);
 
-                    var line = reader.ReadLine();
-                    if (line != null)
-                    {
-                        currentTuples.Add(DeserializeTuple(line));
-                    }
-                    else
-                    {
-                        currentTuples.Add(null);
-                    }
+                    var buffer = new Queue<Models.Tuple>();
+                    LoadBufferFromRun(reader, buffer, TUPLES_PER_PAGE);
+                    inputBuffers.Add(buffer);
                 }
 
-                using (var writer = new StreamWriter(outFile))
+                using (var writer = new StreamWriter(outfile))
                 {
-                    while (currentTuples.Any(t => t != null))
+                    while(inputBuffers.Any(b => b.Count > 0))
                     {
                         Models.Tuple minTuple = null;
-                        int minIndex = -1;
+                        int minBufferIndex = -1;
 
-                        for (int i = 0; i < currentTuples.Count; i++)
+                        for (int i = 0; i < inputBuffers.Count; i++)
                         {
-                            if (currentTuples[i] != null)
+                            if (inputBuffers[i].Count > 0)
                             {
-                                if (minTuple == null || CompareTuple(currentTuples[i], minTuple, columnName) < 0)
+                                var currentTuple = inputBuffers[i].Peek();
+                                if (minTuple == null 
+                                    || CompareTuple(currentTuple, minTuple, columname) < 0)
                                 {
-                                    minTuple = currentTuples[i];
-                                    minIndex = i;
+                                    minTuple = currentTuple;
+                                    minBufferIndex = i;
                                 }
                             }
                         }
 
                         if (minTuple != null)
                         {
-                            writer.WriteLine(SerializeTuple(minTuple));
+                            inputBuffers[minBufferIndex].Dequeue();
 
-                            var nextLine = readers[minIndex].ReadLine();
-                            if (nextLine != null)
+                            outputBuffer.Add(minTuple);
+
+                            if (outputBuffer.Count >= OUTPUT_BUFFER * TUPLES_PER_PAGE)
                             {
-                                currentTuples[minIndex] = DeserializeTuple(nextLine);
+                                WriteOutputBuffer(writer, outputBuffer);
+                                outputBuffer.Clear();
                             }
-                            else
+
+                            if (inputBuffers[minBufferIndex].Count == 0)
                             {
-                                currentTuples[minIndex] = null;
+                                LoadBufferFromRun(readers[minBufferIndex],
+                                                inputBuffers[minBufferIndex],
+                                                TUPLES_PER_PAGE);
                             }
                         }
+                    }
+
+                    if (outputBuffer.Count > 0)
+                    {
+                        WriteOutputBuffer(writer, outputBuffer);
                     }
                 }
             }
@@ -181,34 +231,46 @@ namespace sgbg_trab_2.Operations
                 foreach (var reader in readers)
                 {
                     reader?.Dispose();
-                }
+                }   
             }
 
-            _IOCount++;
-            return outFile;
+            int pagesWritten = (int)Math.Ceiling((double)outputBuffer.Count / TUPLES_PER_PAGE);
+            _IOCount += pagesWritten;
+            return outfile;
         }
 
-        private List<Models.Tuple> LoadSortedTuples(string filePath)
+        private void LoadBufferFromRun(StreamReader reader, Queue<Models.Tuple> buffer, int maxTuples)
         {
-            var sortedTuples = new List<Models.Tuple>();
-            _IOCount++;
+            int count = 0;
+            string line;
 
-            using (var reader = new StreamReader(filePath))
+            int maxTuplesToLoad = Math.Min(maxTuples, TUPLES_PER_PAGE);
+
+            while (count < maxTuplesToLoad && (line = reader.ReadLine()) != null)
             {
-                string line;
-                while ((line = reader.ReadLine()) != null)
-                {
-                    sortedTuples.Add(DeserializeTuple(line));
-                }
+                buffer.Enqueue(DeserializeTuple(line));
+                count++;
             }
-
-            return sortedTuples;
         }
 
-        private void ExecuteMergeJoin(List<Models.Tuple> firstSorted, List<Models.Tuple> secondSorted)
+        private void WriteOutputBuffer(StreamWriter writer, List<Models.Tuple> outputBuffer)
         {
+            foreach (var tuple in outputBuffer)
+            {
+                writer.WriteLine(SerializeTuple(tuple));
+            }
+
+            int pagesWritten = (int)Math.Ceiling((double)outputBuffer.Count / TUPLES_PER_PAGE);
+            _IOCount += pagesWritten;
+        }
+
+        private void ExecuteMergeJoinWithBuffers(List<string> firstRuns, List<string> secondRuns)
+        {
+            var firstSorted = LoadSortedTuples(firstRuns[0]);
+            var secondSorted = LoadSortedTuples(secondRuns[0]);
+
             int i = 0, j = 0;
-            var actualPage = new Page();
+            var outputBuffer = new List<Models.Tuple>();
 
             while (i < firstSorted.Count && j < secondSorted.Count)
             {
@@ -221,38 +283,28 @@ namespace sgbg_trab_2.Operations
                 {
                     int startJ = j;
 
-                    while (i < firstSorted.Count && CompareValues(firstSorted[i].GetValue(_firstColumn), firstValue) == 0)
+                    while (i < firstSorted.Count &&
+                           CompareValues(firstSorted[i].GetValue(_firstColumn), firstValue) == 0)
                     {
                         j = startJ;
 
-                        while (j < secondSorted.Count && CompareValues(secondSorted[j].GetValue(_secondColumn), secondValue) == 0)
+                        while (j < secondSorted.Count &&
+                               CompareValues(secondSorted[j].GetValue(_secondColumn), secondValue) == 0)
                         {
-                            var mergedTuple = new Models.Tuple();
-
-                            foreach (var kv in firstSorted[i].Cols)
-                            {
-                                mergedTuple.Cols[kv.Key] = kv.Value;
-                            }
-
-                            foreach (var kv in secondSorted[j].Cols)
-                            {
-                                if (!mergedTuple.Cols.ContainsKey(kv.Key))
-                                {
-                                    mergedTuple.Cols[kv.Key] = kv.Value;
-                                }
-                            }
+                            var mergedTuple = CreateMergedTuple(firstSorted[i], secondSorted[j]);
 
                             _resultTuples.Add(mergedTuple);
+                            _tuplesCount++;
 
-                            if (!actualPage.AddTuple(mergedTuple))
+                            outputBuffer.Add(mergedTuple);
+                            if (outputBuffer.Count >= OUTPUT_BUFFER * TUPLES_PER_PAGE)
                             {
-                                _pagesCount++;
-                                _IOCount++;
-                                actualPage = new Page();
-                                actualPage.AddTuple(mergedTuple);
+                                int pages = (int)Math.Ceiling((double)outputBuffer.Count / TUPLES_PER_PAGE);
+                                _pagesCount += pages;
+                                _IOCount += pages;
+                                outputBuffer.Clear();
                             }
 
-                            _tuplesCount++;
                             j++;
                         }
                         i++;
@@ -267,6 +319,52 @@ namespace sgbg_trab_2.Operations
                     j++;
                 }
             }
+
+            if (outputBuffer.Count > 0)
+            {
+                int pages = (int)Math.Ceiling((double)outputBuffer.Count / TUPLES_PER_PAGE);
+                _pagesCount += pages;
+                _IOCount += pages;
+            }
+        }
+
+        private Models.Tuple CreateMergedTuple(Models.Tuple first, Models.Tuple second)
+        {
+            var mergedTuple = new Models.Tuple();
+
+            foreach (var kv in first.Cols)
+            {
+                mergedTuple.Cols[kv.Key] = kv.Value;
+            }
+
+            foreach (var kv in second.Cols)
+            {
+                if (!mergedTuple.Cols.ContainsKey(kv.Key))
+                {
+                    mergedTuple.Cols[kv.Key] = kv.Value;
+                }
+            }
+
+            return mergedTuple;
+        }
+
+        private List<Models.Tuple> LoadSortedTuples(string filePath)
+        {
+            var sortedTuples = new List<Models.Tuple>();
+            int pagesRead = (int)Math.Ceiling((double)sortedTuples.Count / TUPLES_PER_PAGE);
+            _IOCount += pagesRead;
+
+
+            using (var reader = new StreamReader(filePath))
+            {
+                string line;
+                while ((line = reader.ReadLine()) != null)
+                {
+                    sortedTuples.Add(DeserializeTuple(line));
+                }
+            }
+
+            return sortedTuples;
         }
 
         private int CompareTuple(Models.Tuple t1, Models.Tuple t2, string columnName)
