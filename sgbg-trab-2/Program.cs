@@ -19,10 +19,9 @@ class Program
 
             var results = new List<JoinResult>();
 
-            //results.Add(new JoinResult("Uva join Vinho", new Operator(uva, vinho, "uva_id", "uva_id")));
+            results.Add(new JoinResult("Uva join Vinho", new Operator(uva, vinho, "uva_id", "uva_id")));
             results.Add(new JoinResult("Vinho join Uva", new Operator(vinho, uva, "uva_id", "uva_id")));
-            //results.Add(new JoinResult("Uva join País", new Operator(uva, pais, "pais_origem_id", "pais_id")));
-            //results.Add(new JoinResult("Vinho join País", new Operator(vinho, pais, "pais_producao_id", "pais_id")));
+            results.Add(new JoinResult("Uva join País", new Operator(uva, pais, "pais_origem_id", "pais_id")));
 
             foreach (var result in results)
                 result.Op.Execute();
